@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connect Four – Together Time</title>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Fredoka+One&display=swap" rel="stylesheet">
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ─── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────────────────
+// 1. Go to https://console.firebase.google.com
+// 2. Create a project → Add Web App → copy the firebaseConfig object below
+// 3. In Firebase console: Build → Realtime Database → Create database (test mode)
+const firebaseConfig = {
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "PASTE_YOUR_AUTH_DOMAIN",
+  databaseURL: "PASTE_YOUR_DATABASE_URL",
+  projectId: "PASTE_YOUR_PROJECT_ID",
+  storageBucket: "PASTE_YOUR_STORAGE_BUCKET",
+  messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID",
+  appId: "PASTE_YOUR_APP_ID"
+};
+// ──────────────────────────────────────────────────────────────────────────────
+
+const ROWS = 6, COLS = 7;
+let myRole = null;      // 'p1' | 'p2' | 'observer'
+let gameId = null;
+let localName = '';
+let db, gameRef;
+let unsubscribe = null;
+
+// ── Boot ────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  // Check if config is filled in
+  if (firebaseConfig.apiKey === "PASTE_YOUR_API_KEY") {
+    showConfigError();
+    return;
+  }
+  const app = initializeApp(firebaseConfig);
+  db = getDatabase(app);
+
+  // Parse ?game=XXXX from URL
+  const params = new URLSearchParams(location.search);
+  gameId = params.get('game');
+
+  if (gameId) {
+    joinGame(gameId);
+  } else {
+    showLobby();
+  }
+});
+
+// ── Config Error ─────────────────────────────────────────────────────────────
+function showConfigError() {
+  document.getElementById('screen-lobby').style.display = 'none';
+  document.getElementById('screen-config-error').style.display = 'flex';
+}
+
+// ── Lobby ────────────────────────────────────────────────────────────────────
+function showLobby() {
+  document.getElementById('screen-lobby').style.display = 'flex';
+  document.getElementById('screen-game').style.display = 'none';
+}
+
+window.createGame = async function() {
+  const nameInput = document.getElementById('lobby-name').value.trim() || 'Player 1';
+  localName = nameInput;
+  gameId = Math.random().toString(36).substr(2, 6).toUpperCase();
+  myRole = 'p1';
+
+  const initialState = {
+    board: Array(ROWS).fill(null).map(() => Array(COLS).fill(0)),
+    currentPlayer: 1,
+    status: 'waiting',   // waiting | playing | gameover
+    winner: null,
+    winCells: null,
+    p1: { name: nameInput, score: 0, feeling: null },
+    p2: { name: 'Waiting...', score: 0, feeling: null },
+    lastMove: null,
+    resetRequest: null,
+  };
+
+  await set(ref(db, `games/${gameId}`), initialState);
+
+  // Update URL without reload
+  history.pushState({}, '', `?game=${gameId}`);
+  startGame();
+}
+
+async function joinGame(id) {
+  gameId = id;
+  const snap = await get(ref(db, `games/${gameId}`));
+  if (!snap.exists()) {
+    alert("Game not found! The link may have expired.");
+    history.pushState({}, '', location.pathname);
+    showLobby();
+    return;
+  }
+  const state = snap.val();
+
+  if (!state.p2 || state.p2.name === 'Waiting...') {
+    // Join as P2
+    myRole = 'p2';
+    document.getElementById('screen-lobby').style.display = 'flex';
+    document.getElementById('screen-game').style.display = 'none';
+    document.getElementById('lobby-title').textContent = '🙌 Join Game';
+    document.getElementById('lobby-subtitle').textContent = `You've been invited! Enter your name to join.`;
+    document.getElementById('lobby-create-btn').style.display = 'none';
+    document.getElementById('lobby-join-btn').style.display = 'block';
+  } else {
+    myRole = 'observer';
+    localName = 'Observer';
+    startGame();
+  }
+}
+
+window.joinAsP2 = async function() {
+  const nameInput = document.getElementById('lobby-name').value.trim() || 'Player 2';
+  localName = nameInput;
+  await update(ref(db, `games/${gameId}/p2`), { name: nameInput, score: 0, feeling: null });
+  await update(ref(db, `games/${gameId}`), { status: 'playing' });
+  startGame();
+}
+
+// ── Game Screen ──────────────────────────────────────────────────────────────
+function startGame() {
+  document.getElementById('screen-lobby').style.display = 'none';
+  document.getElementById('screen-game').style.display = 'flex';
+
+  // Show share link if P1
+  if (myRole === 'p1') {
+    const link = location.href;
+    document.getElementById('share-section').style.display = 'block';
+    document.getElementById('share-link').value = link;
+  }
+
+  // Role badge
+  const roleBadge = document.getElementById('role-badge');
+  if (myRole === 'p1') roleBadge.textContent = '🔴 You are Player 1';
+  else if (myRole === 'p2') roleBadge.textContent = '🟢 You are Player 2';
+  else roleBadge.textContent = '👁 Watching';
+
+  buildBoard();
+  subscribeToGame();
+}
+
+function subscribeToGame() {
+  gameRef = ref(db, `games/${gameId}`);
+  if (unsubscribe) unsubscribe();
+  unsubscribe = onValue(gameRef, (snap) => {
+    if (!snap.exists()) return;
+    renderState(snap.val());
+  });
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function renderState(state) {
+  const { board, currentPlayer, status, winner, winCells, p1, p2 } = state;
+
+  // Names & scores
+  document.getElementById('name1').textContent = p1?.name || 'Player 1';
+  document.getElementById('name2').textContent = p2?.name || 'Waiting...';
+  document.getElementById('score1').textContent = p1?.score || 0;
+  document.getElementById('score2').textContent = p2?.score || 0;
+
+  // Feelings
+  if (p1?.feeling) document.getElementById('feeling1').textContent = feelingEmoji(p1.feeling);
+  if (p2?.feeling) document.getElementById('feeling2').textContent = feelingEmoji(p2.feeling);
+
+  // Player cards active state
+  document.getElementById('card1').classList.toggle('active', currentPlayer === 1 && status === 'playing');
+  document.getElementById('card2').classList.toggle('active', currentPlayer === 2 && status === 'playing');
+  document.getElementById('card1').classList.toggle('my-card', myRole === 'p1');
+  document.getElementById('card2').classList.toggle('my-card', myRole === 'p2');
+
+  // Cells
+  const cells = document.querySelectorAll('.cell');
+  cells.forEach(cell => {
+    const r = +cell.dataset.row, c = +cell.dataset.col;
+    const val = board[r][c];
+    cell.className = 'cell';
+    if (val === 1) cell.classList.add('p1');
+    if (val === 2) cell.classList.add('p2');
+  });
+
+  // Win cells
+  if (winCells) {
+    winCells.forEach(([r, c]) => {
+      document.querySelector(`[data-row="${r}"][data-col="${c}"]`).classList.add('win-cell');
+    });
+  }
+
+  // Status banner
+  const statusEl = document.getElementById('statusBanner');
+  if (status === 'waiting') {
+    statusEl.textContent = '⏳ Waiting for Player 2 to join...';
+    statusEl.className = 'status-banner waiting';
+  } else if (status === 'gameover' && winner) {
+    const winnerName = winner === 1 ? p1?.name : p2?.name;
+    statusEl.textContent = `🎉 ${winnerName} wins! Amazing!`;
+    statusEl.className = 'status-banner win';
+    if (!statusEl.dataset.celebrated) {
+      launchConfetti();
+      statusEl.dataset.celebrated = '1';
+    }
+  } else if (status === 'gameover' && !winner) {
+    statusEl.textContent = `🤝 It's a tie! Great game!`;
+    statusEl.className = 'status-banner draw';
+  } else {
+    const turnName = currentPlayer === 1 ? p1?.name : p2?.name;
+    const isMyTurn = (myRole === 'p1' && currentPlayer === 1) || (myRole === 'p2' && currentPlayer === 2);
+    statusEl.textContent = isMyTurn ? `✨ Your turn, ${turnName}!` : `⏳ ${turnName}'s turn...`;
+    statusEl.className = 'status-banner' + (isMyTurn ? ' my-turn' : '');
+    statusEl.removeAttribute('data-celebrated');
+  }
+
+  // My turn indicator on board
+  const isMyTurn = (myRole === 'p1' && currentPlayer === 1) || (myRole === 'p2' && currentPlayer === 2);
+  document.getElementById('board').classList.toggle('my-turn-board', isMyTurn && status === 'playing');
+}
+
+// ── Board ────────────────────────────────────────────────────────────────────
+function buildBoard() {
+  const boardEl = document.getElementById('board');
+  const indEl = document.getElementById('colIndicators');
+  boardEl.innerHTML = '';
+  indEl.innerHTML = '';
+
+  for (let c = 0; c < COLS; c++) {
+    const ind = document.createElement('div');
+    ind.className = 'col-indicator';
+    ind.innerHTML = `<svg viewBox="0 0 10 8"><polygon points="5,8 0,0 10,0"/></svg>`;
+    ind.addEventListener('mouseenter', () => setHoverIndicator(c, true));
+    ind.addEventListener('mouseleave', () => setHoverIndicator(c, false));
+    ind.addEventListener('click', () => handleDrop(c));
+    indEl.appendChild(ind);
+  }
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.dataset.row = r;
+      cell.dataset.col = c;
+      cell.addEventListener('click', () => handleDrop(c));
+      cell.addEventListener('mouseenter', () => setHoverIndicator(c, true));
+      cell.addEventListener('mouseleave', () => setHoverIndicator(c, false));
+      boardEl.appendChild(cell);
+    }
+  }
+}
+
+function setHoverIndicator(col, on) {
+  const inds = document.querySelectorAll('.col-indicator');
+  inds.forEach((ind, i) => {
+    ind.classList.remove('hover-p1', 'hover-p2');
+    if (i === col && on) {
+      ind.classList.add(myRole === 'p1' ? 'hover-p1' : 'hover-p2');
+    }
+  });
+}
+
+// ── Drop Piece ───────────────────────────────────────────────────────────────
+async function handleDrop(col) {
+  const snap = await get(ref(db, `games/${gameId}`));
+  const state = snap.val();
+
+  if (state.status !== 'playing') return;
+  if (myRole === 'observer') return;
+  if (myRole === 'p1' && state.currentPlayer !== 1) return;
+  if (myRole === 'p2' && state.currentPlayer !== 2) return;
+
+  const board = state.board;
+  let row = -1;
+  for (let r = ROWS - 1; r >= 0; r--) {
+    if (board[r][col] === 0) { row = r; break; }
+  }
+  if (row === -1) return;
+
+  board[row][col] = state.currentPlayer;
+
+  const win = checkWin(board, row, col, state.currentPlayer);
+  const draw = !win && board[0].every(v => v !== 0);
+
+  const updates = { board, lastMove: { row, col } };
+
+  if (win) {
+    updates.status = 'gameover';
+    updates.winner = state.currentPlayer;
+    updates.winCells = win;
+    // Increment score
+    const scoreKey = state.currentPlayer === 1 ? 'p1/score' : 'p2/score';
+    updates[scoreKey] = (state.currentPlayer === 1 ? state.p1.score : state.p2.score) + 1;
+  } else if (draw) {
+    updates.status = 'gameover';
+    updates.winner = null;
+  } else {
+    updates.currentPlayer = state.currentPlayer === 1 ? 2 : 1;
+  }
+
+  await update(ref(db, `games/${gameId}`), updates);
+}
+
+// ── Win Check ────────────────────────────────────────────────────────────────
+function checkWin(board, row, col, player) {
+  const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+  for (const [dr, dc] of dirs) {
+    let cells = [[row, col]];
+    for (const sign of [-1, 1]) {
+      let r = row + dr*sign, c = col + dc*sign;
+      while (r>=0 && r<ROWS && c>=0 && c<COLS && board[r][c]===player) {
+        cells.push([r,c]); r+=dr*sign; c+=dc*sign;
+      }
+    }
+    if (cells.length >= 4) return cells;
+  }
+  return null;
+}
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+window.resetGame = async function() {
+  const snap = await get(ref(db, `games/${gameId}`));
+  const state = snap.val();
+  await update(ref(db, `games/${gameId}`), {
+    board: Array(ROWS).fill(null).map(() => Array(COLS).fill(0)),
+    currentPlayer: 1,
+    status: 'playing',
+    winner: null,
+    winCells: null,
+    lastMove: null,
+  });
+}
+
+window.resetScores = async function() {
+  await update(ref(db, `games/${gameId}`), {
+    board: Array(ROWS).fill(null).map(() => Array(COLS).fill(0)),
+    currentPlayer: 1,
+    status: 'playing',
+    winner: null,
+    winCells: null,
+    lastMove: null,
+    'p1/score': 0,
+    'p2/score': 0,
+  });
+}
+
+// ── Feeling Check-in ─────────────────────────────────────────────────────────
+window.selectFeeling = async function(btn) {
+  document.querySelectorAll('.feeling-btn').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+  const feeling = btn.dataset.feeling;
+  const responses = {
+    happy: "That's wonderful! 😊 Let's have a great game!",
+    excited: "Love the energy! 🤩 Let's go!",
+    calm: "Nice and calm — perfect for a focused game! 😌",
+    nervous: "It's okay to feel nervous. We're here to have fun! 💙",
+    sad: "Thanks for sharing. Let's play together. 💙",
+    angry: "It's okay to feel frustrated. Let's take a breath! 🌈",
+    tired: "Even tired, you've got this! 😊",
+    silly: "Silly is GREAT! 🤪🎉"
+  };
+  document.getElementById('checkinNote').textContent = responses[feeling] || '';
+
+  if (gameId && myRole) {
+    const key = myRole === 'p1' ? 'p1/feeling' : 'p2/feeling';
+    await update(ref(db, `games/${gameId}`), { [key]: feeling });
+  }
+}
+
+function feelingEmoji(f) {
+  const map = { happy:'😊', excited:'🤩', calm:'😌', nervous:'😬', sad:'😔', angry:'😤', tired:'😴', silly:'🤪' };
+  return map[f] || '';
+}
+
+// ── Copy Link ────────────────────────────────────────────────────────────────
+window.copyLink = function() {
+  const inp = document.getElementById('share-link');
+  inp.select();
+  navigator.clipboard.writeText(inp.value).then(() => {
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => btn.textContent = '📋 Copy', 2000);
+  });
+}
+
+// ── Prompts ──────────────────────────────────────────────────────────────────
+const prompts = [
+  "🌟 What's one thing that made you smile this week?",
+  "🎨 If you could paint your bedroom any color, what would you pick?",
+  "🦸 What superpower would you most want — and why?",
+  "🍕 If you could only eat one food forever, what would it be?",
+  "🌊 Would you rather explore outer space or the deep ocean?",
+  "🎵 What song is stuck in your head lately?",
+  "🐾 If you had a magical pet, what animal would it be?",
+  "🌈 What's something kind someone did for you recently?",
+  "⚡ What do you do when you feel really frustrated?",
+  "🏆 What's something you're really proud of?",
+  "🌙 What do you think about right before you fall asleep?",
+  "🌳 What's your favorite place to be when you need to feel calm?",
+  "💪 What's something hard you kept trying at — even when it was tough?"
+];
+let lastPrompt = -1;
+window.showPrompt = function() {
+  let idx;
+  do { idx = Math.floor(Math.random() * prompts.length); } while (idx === lastPrompt);
+  lastPrompt = idx;
+  document.getElementById('prompt-text').textContent = prompts[idx];
+  document.getElementById('prompt-modal').style.display = 'flex';
+}
+window.closePrompt = function() {
+  document.getElementById('prompt-modal').style.display = 'none';
+}
+
+// ── Confetti ─────────────────────────────────────────────────────────────────
+function launchConfetti() {
+  const container = document.getElementById('confetti');
+  container.innerHTML = '';
+  const colors = ['#ef8c78','#06d6a0','#ffd166','#118ab2','#ff6b9d','#c77dff'];
+  for (let i = 0; i < 90; i++) {
+    const p = document.createElement('div');
+    p.className = 'confetti-piece';
+    p.style.cssText = `
+      left:${Math.random()*100}vw;
+      background:${colors[Math.floor(Math.random()*colors.length)]};
+      width:${6+Math.random()*8}px;
+      height:${6+Math.random()*8}px;
+      border-radius:${Math.random()>.5?'50%':'2px'};
+      animation-duration:${2+Math.random()*2}s;
+      animation-delay:${Math.random()}s;
+    `;
+    container.appendChild(p);
+    p.addEventListener('animationend', () => p.remove());
+  }
+}
+</script>
+
+<style>
+:root {
+  --sky: #e8f4fd;
+  --white: #ffffff;
+  --sun: #ffd166;
+  --coral: #ef8c78;
+  --coral-light: #f4b5a8;
+  --mint: #06d6a0;
+  --mint-light: #7eecd5;
+  --blue: #118ab2;
+  --navy: #073b4c;
+  --board: #118ab2;
+  --board-dark: #0d6b8a;
+  --empty: #d6eaf7;
+  --shadow: rgba(7,59,76,0.15);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Nunito',sans-serif;background:var(--sky);min-height:100vh;display:flex;flex-direction:column;align-items:center;overflow-x:hidden;}
+
+/* Clouds */
+.bg-clouds{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+.cloud{position:absolute;background:white;border-radius:50px;opacity:0.5;animation:floatCloud linear infinite;}
+.cloud::before,.cloud::after{content:'';position:absolute;background:white;border-radius:50%;}
+.cloud:nth-child(1){width:120px;height:40px;top:8%;left:-150px;animation-duration:45s;}
+.cloud:nth-child(1)::before{width:60px;height:60px;top:-30px;left:15px;}
+.cloud:nth-child(1)::after{width:40px;height:40px;top:-20px;left:55px;}
+.cloud:nth-child(2){width:90px;height:30px;top:22%;left:-120px;animation-duration:60s;animation-delay:-20s;opacity:0.35;}
+.cloud:nth-child(2)::before{width:45px;height:45px;top:-22px;left:10px;}
+.cloud:nth-child(2)::after{width:30px;height:30px;top:-15px;left:42px;}
+.cloud:nth-child(3){width:150px;height:50px;top:5%;left:-200px;animation-duration:75s;animation-delay:-35s;opacity:0.25;}
+.cloud:nth-child(3)::before{width:70px;height:70px;top:-35px;left:20px;}
+.cloud:nth-child(3)::after{width:50px;height:50px;top:-25px;left:70px;}
+@keyframes floatCloud{from{transform:translateX(0)}to{transform:translateX(110vw)}}
+
+/* Stars */
+.stars{position:fixed;inset:0;pointer-events:none;z-index:0;}
+.star{position:absolute;width:6px;height:6px;background:var(--sun);border-radius:50%;animation:twinkle 3s ease-in-out infinite;}
+@keyframes twinkle{0%,100%{opacity:.2;transform:scale(1)}50%{opacity:.8;transform:scale(1.4)}}
+
+/* Confetti */
+.confetti-container{position:fixed;inset:0;pointer-events:none;z-index:100;overflow:hidden;}
+.confetti-piece{position:absolute;top:-20px;animation:confettiFall linear forwards;}
+@keyframes confettiFall{0%{transform:translateY(0) rotate(0);opacity:1}100%{transform:translateY(110vh) rotate(720deg);opacity:0}}
+
+/* Screens */
+.screen{position:relative;z-index:1;width:100%;max-width:720px;padding:20px 16px 40px;display:flex;flex-direction:column;align-items:center;gap:18px;}
+
+/* Lobby */
+#screen-lobby{min-height:100vh;justify-content:center;}
+.lobby-card{background:white;border-radius:28px;padding:36px 40px;box-shadow:0 8px 40px var(--shadow);text-align:center;max-width:400px;width:100%;}
+.lobby-card h1{font-family:'Fredoka One',cursive;font-size:2.4rem;color:var(--navy);line-height:1;}
+.lobby-card h1 span{color:var(--blue);}
+.lobby-card p{color:#5a8a9f;font-size:.9rem;font-weight:600;margin:6px 0 24px;}
+.lobby-input{width:100%;padding:12px 16px;border:2.5px solid #d6eaf7;border-radius:14px;font-family:'Nunito',sans-serif;font-size:1rem;font-weight:700;color:var(--navy);outline:none;transition:border-color .2s;margin-bottom:14px;}
+.lobby-input:focus{border-color:var(--blue);}
+
+/* Config error */
+#screen-config-error{min-height:100vh;justify-content:center;}
+.config-card{background:white;border-radius:28px;padding:32px 36px;box-shadow:0 8px 40px var(--shadow);max-width:480px;width:100%;}
+.config-card h2{font-family:'Fredoka One',cursive;color:var(--navy);font-size:1.6rem;margin-bottom:12px;}
+.config-card p{color:#5a8a9f;font-size:.9rem;font-weight:600;line-height:1.6;margin-bottom:12px;}
+.config-card ol{color:#5a8a9f;font-size:.88rem;font-weight:600;padding-left:18px;line-height:2;}
+.config-card code{background:#e8f4fd;padding:2px 7px;border-radius:6px;font-size:.85rem;color:var(--blue);}
+
+/* Header */
+header{text-align:center;padding-top:4px;}
+header h1{font-family:'Fredoka One',cursive;font-size:clamp(1.8rem,5vw,2.8rem);color:var(--navy);line-height:1;}
+header h1 span{color:var(--blue);}
+header p{font-size:.85rem;color:#5a8a9f;margin-top:3px;font-weight:600;}
+
+/* Role badge */
+.role-badge{background:white;border-radius:50px;padding:7px 18px;font-size:.8rem;font-weight:800;color:var(--navy);box-shadow:0 2px 10px var(--shadow);}
+
+/* Share section */
+.share-section{background:white;border-radius:16px;padding:14px 18px;width:100%;box-shadow:0 4px 20px var(--shadow);display:none;}
+.share-section p{font-size:.8rem;font-weight:700;color:#5a8a9f;margin-bottom:8px;}
+.share-row{display:flex;gap:8px;}
+.share-input{flex:1;padding:8px 12px;border:2px solid #d6eaf7;border-radius:10px;font-size:.8rem;font-weight:700;color:var(--navy);outline:none;font-family:'Nunito',sans-serif;}
+
+/* Check-in */
+.checkin-panel{background:white;border-radius:20px;padding:16px 20px;width:100%;box-shadow:0 4px 20px var(--shadow);}
+.checkin-panel h3{font-family:'Fredoka One',cursive;color:var(--navy);font-size:1.05rem;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+.feelings-grid{display:flex;flex-wrap:wrap;gap:7px;}
+.feeling-btn{background:var(--sky);border:2px solid transparent;border-radius:50px;padding:6px 13px;font-family:'Nunito',sans-serif;font-weight:700;font-size:.82rem;cursor:pointer;color:var(--navy);transition:all .2s;display:flex;align-items:center;gap:4px;}
+.feeling-btn:hover{background:#d0eaf8;}
+.feeling-btn.selected{border-color:var(--blue);background:#ddf0fb;color:var(--blue);}
+.checkin-note{margin-top:10px;font-size:.78rem;color:#7aabb8;font-weight:600;font-style:italic;}
+
+/* Players */
+.players{display:flex;gap:10px;width:100%;}
+.player-card{flex:1;background:white;border-radius:20px;padding:12px 16px;box-shadow:0 4px 20px var(--shadow);display:flex;align-items:center;gap:10px;border:3px solid transparent;transition:all .3s;position:relative;overflow:hidden;}
+.player-card.active{transform:translateY(-3px);box-shadow:0 8px 28px var(--shadow);}
+.player-card.p1{color:var(--coral);}
+.player-card.p2{color:var(--mint);}
+.player-card.p1.active{border-color:var(--coral);}
+.player-card.p2.active{border-color:var(--mint);}
+.player-card.my-card::before{content:'YOU';position:absolute;top:6px;right:10px;font-size:.6rem;font-weight:900;opacity:.5;letter-spacing:.5px;}
+.player-disc{width:40px;height:40px;border-radius:50%;flex-shrink:0;box-shadow:inset 0 -4px 0 rgba(0,0,0,.15),0 3px 10px rgba(0,0,0,.15);}
+.p1 .player-disc{background:radial-gradient(circle at 35% 35%,var(--coral-light),var(--coral));}
+.p2 .player-disc{background:radial-gradient(circle at 35% 35%,var(--mint-light),var(--mint));}
+.player-info{flex:1;min-width:0;}
+.player-name{font-weight:800;font-size:1rem;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.player-label{font-size:.68rem;font-weight:700;opacity:.55;text-transform:uppercase;letter-spacing:.5px;}
+.feeling-indicator{font-size:1.1rem;min-width:22px;}
+.score-badge{font-family:'Fredoka One',cursive;font-size:1.5rem;line-height:1;color:inherit;}
+
+/* Status */
+.status-banner{background:white;border-radius:16px;padding:12px 24px;box-shadow:0 4px 20px var(--shadow);font-family:'Fredoka One',cursive;font-size:1.15rem;color:var(--navy);text-align:center;min-width:260px;transition:all .3s;}
+.status-banner.win{background:linear-gradient(135deg,#ffd166,#ffb347);animation:winPulse .6s ease;}
+.status-banner.draw{background:linear-gradient(135deg,#c8e6ff,#a8d4f0);}
+.status-banner.waiting{background:linear-gradient(135deg,#f0f4f8,#e2ecf5);color:#7aabb8;}
+.status-banner.my-turn{background:linear-gradient(135deg,#e8fbf5,#c6f5e8);border:2px solid var(--mint);}
+@keyframes winPulse{0%{transform:scale(.95)}50%{transform:scale(1.05)}100%{transform:scale(1)}}
+
+/* Board */
+.board-outer{background:var(--board);border-radius:24px;padding:14px;box-shadow:0 8px 0 var(--board-dark),0 12px 30px rgba(7,59,76,.3);}
+.col-indicators{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:8px;padding:0 2px;}
+.col-indicator{height:14px;border-radius:50%;background:rgba(255,255,255,.15);transition:all .2s;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.col-indicator.hover-p1{background:var(--coral-light);}
+.col-indicator.hover-p2{background:var(--mint-light);}
+.col-indicator svg{display:none;width:10px;height:10px;fill:var(--navy);}
+.col-indicator.hover-p1 svg,.col-indicator.hover-p2 svg{display:block;}
+.board-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;}
+.board-grid.my-turn-board .cell:hover{cursor:pointer;background:#c0dff5;}
+.cell{width:clamp(42px,8vw,70px);height:clamp(42px,8vw,70px);border-radius:50%;background:var(--empty);box-shadow:inset 0 4px 8px rgba(0,0,0,.15);cursor:default;transition:background .15s;position:relative;overflow:hidden;}
+.cell.p1{background:radial-gradient(circle at 35% 35%,var(--coral-light),var(--coral));box-shadow:inset 0 -4px 0 rgba(0,0,0,.2),0 2px 8px rgba(239,140,120,.5);animation:dropIn .35s cubic-bezier(.34,1.56,.64,1);}
+.cell.p2{background:radial-gradient(circle at 35% 35%,var(--mint-light),var(--mint));box-shadow:inset 0 -4px 0 rgba(0,0,0,.2),0 2px 8px rgba(6,214,160,.5);animation:dropIn .35s cubic-bezier(.34,1.56,.64,1);}
+.cell.win-cell{animation:winFlash .6s ease infinite alternate;}
+.cell.p1::after,.cell.p2::after{content:'';position:absolute;top:15%;left:20%;width:35%;height:30%;background:rgba(255,255,255,.35);border-radius:50%;transform:rotate(-30deg);}
+@keyframes dropIn{from{transform:scale(.3) translateY(-40px);opacity:0}to{transform:scale(1) translateY(0);opacity:1}}
+@keyframes winFlash{from{filter:brightness(1);transform:scale(1)}to{filter:brightness(1.3);transform:scale(1.08);box-shadow:0 0 16px 4px rgba(255,209,102,.8)}}
+
+/* Controls */
+.controls{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;}
+.btn{font-family:'Nunito',sans-serif;font-weight:800;font-size:.88rem;border:none;border-radius:50px;padding:10px 22px;cursor:pointer;transition:all .2s;box-shadow:0 4px 0 rgba(0,0,0,.15);}
+.btn:active{transform:translateY(3px);box-shadow:0 1px 0 rgba(0,0,0,.15);}
+.btn-primary{background:var(--blue);color:white;}
+.btn-primary:hover{background:#0d6b8a;}
+.btn-secondary{background:white;color:var(--navy);}
+.btn-secondary:hover{background:#eef6fb;}
+.btn-fun{background:var(--sun);color:var(--navy);}
+.btn-fun:hover{background:#ffc233;}
+
+/* Prompt Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(7,59,76,.4);z-index:200;display:none;align-items:center;justify-content:center;padding:20px;}
+.modal{background:white;border-radius:24px;padding:32px 36px;max-width:380px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(7,59,76,.3);}
+.modal h3{font-family:'Fredoka One',cursive;color:var(--navy);font-size:1.3rem;margin-bottom:16px;}
+.modal p{font-size:1.05rem;font-weight:700;color:var(--blue);line-height:1.5;margin-bottom:20px;}
+</style>
+</head>
+<body>
+
+<div class="bg-clouds"><div class="cloud"></div><div class="cloud"></div><div class="cloud"></div></div>
+<div class="stars" id="stars"></div>
+<div class="confetti-container" id="confetti"></div>
+
+<!-- ── Config Error Screen ── -->
+<div id="screen-config-error" class="screen" style="display:none;">
+  <div class="config-card">
+    <h2>🔧 Firebase Setup Required</h2>
+    <p>This game needs a free Firebase project to sync moves in real time between two players. It takes about 5 minutes to set up:</p>
+    <ol>
+      <li>Go to <strong>console.firebase.google.com</strong></li>
+      <li>Click <strong>Add project</strong> → name it anything</li>
+      <li>Click <strong>Add app</strong> → choose <strong>Web (&lt;/&gt;)</strong></li>
+      <li>Copy the <code>firebaseConfig</code> object shown</li>
+      <li>In the left menu: <strong>Build → Realtime Database → Create database</strong> → choose <em>test mode</em></li>
+      <li>Open this HTML file and paste your config at the top of the <code>&lt;script&gt;</code></li>
+    </ol>
+    <br>
+    <p style="font-size:.82rem">Firebase free tier is more than enough for this — no credit card needed.</p>
+  </div>
+</div>
+
+<!-- ── Lobby Screen ── -->
+<div id="screen-lobby" class="screen" style="display:none;">
+  <div class="lobby-card">
+    <h1>Connect <span>Four</span> 🌈</h1>
+    <p id="lobby-subtitle">Enter your name, then create a game and share the link!</p>
+    <input class="lobby-input" id="lobby-name" placeholder="Your name..." maxlength="12" />
+    <button class="btn btn-primary" id="lobby-create-btn" onclick="createGame()" style="width:100%;padding:13px;">🎮 Create Game</button>
+    <button class="btn btn-fun" id="lobby-join-btn" onclick="joinAsP2()" style="width:100%;padding:13px;display:none;">🙌 Join Game</button>
+  </div>
+</div>
+
+<!-- ── Game Screen ── -->
+<div id="screen-game" class="screen" style="display:none;">
+
+  <header>
+    <h1>Connect <span>Four</span> 🌈</h1>
+    <p>Drop a piece — connect four in a row to win!</p>
+  </header>
+
+  <div class="role-badge" id="role-badge">...</div>
+
+  <!-- Share Link (P1 only) -->
+  <div class="share-section" id="share-section">
+    <p>📤 Share this link with your player 2:</p>
+    <div class="share-row">
+      <input class="share-input" id="share-link" readonly />
+      <button class="btn btn-primary" id="copy-btn" onclick="copyLink()">📋 Copy</button>
+    </div>
+  </div>
+
+  <!-- Feeling Check-in -->
+  <div class="checkin-panel">
+    <h3>💭 How are you feeling today?</h3>
+    <div class="feelings-grid">
+      <button class="feeling-btn" data-feeling="happy" onclick="selectFeeling(this)">😊 Happy</button>
+      <button class="feeling-btn" data-feeling="excited" onclick="selectFeeling(this)">🤩 Excited</button>
+      <button class="feeling-btn" data-feeling="calm" onclick="selectFeeling(this)">😌 Calm</button>
+      <button class="feeling-btn" data-feeling="nervous" onclick="selectFeeling(this)">😬 Nervous</button>
+      <button class="feeling-btn" data-feeling="sad" onclick="selectFeeling(this)">😔 Sad</button>
+      <button class="feeling-btn" data-feeling="angry" onclick="selectFeeling(this)">😤 Frustrated</button>
+      <button class="feeling-btn" data-feeling="tired" onclick="selectFeeling(this)">😴 Tired</button>
+      <button class="feeling-btn" data-feeling="silly" onclick="selectFeeling(this)">🤪 Silly</button>
+    </div>
+    <p class="checkin-note" id="checkinNote">Tap a feeling to share how you're doing!</p>
+  </div>
+
+  <!-- Players -->
+  <div class="players">
+    <div class="player-card p1" id="card1">
+      <div class="player-disc"></div>
+      <div class="player-info">
+        <div class="player-label">Player 1</div>
+        <div class="player-name" id="name1">...</div>
+      </div>
+      <div class="feeling-indicator" id="feeling1"></div>
+      <div class="score-badge" id="score1">0</div>
+    </div>
+    <div class="player-card p2" id="card2">
+      <div class="player-disc"></div>
+      <div class="player-info">
+        <div class="player-label">Player 2</div>
+        <div class="player-name" id="name2">Waiting...</div>
+      </div>
+      <div class="feeling-indicator" id="feeling2"></div>
+      <div class="score-badge" id="score2">0</div>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div class="status-banner" id="statusBanner">...</div>
+
+  <!-- Board -->
+  <div class="board-outer">
+    <div class="col-indicators" id="colIndicators"></div>
+    <div class="board-grid" id="board"></div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <button class="btn btn-primary" onclick="resetGame()">🔄 New Game</button>
+    <button class="btn btn-secondary" onclick="resetScores()">Reset Scores</button>
+    <button class="btn btn-fun" onclick="showPrompt()">💬 Conversation Starter</button>
+  </div>
+
+</div>
+
+<!-- Prompt Modal -->
+<div class="modal-overlay" id="prompt-modal" onclick="closePrompt()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h3>💬 Conversation Starter</h3>
+    <p id="prompt-text"></p>
+    <button class="btn btn-fun" onclick="closePrompt()">Got it! ✨</button>
+  </div>
+</div>
+
+<script>
+// Stars
+const starsEl = document.getElementById('stars');
+for (let i = 0; i < 25; i++) {
+  const s = document.createElement('div');
+  s.className = 'star';
+  s.style.cssText = `left:${Math.random()*100}%;top:${Math.random()*100}%;animation-delay:${Math.random()*3}s;animation-duration:${2+Math.random()*2}s;`;
+  starsEl.appendChild(s);
+}
+</script>
+
+</body>
+</html>
