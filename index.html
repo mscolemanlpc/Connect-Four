@@ -15,14 +15,14 @@ import { getDatabase, ref, set, get, onValue, update } from "https://www.gstatic
 // 1. Go to https://console.firebase.google.com
 // 2. Create a project → Add Web App → copy the firebaseConfig object below
 // 3. In Firebase console: Build → Realtime Database → Create database (test mode)
- const firebaseConfig = {
-  apiKey: "AIzaSyBZ8GA_4wtA6AHpb1SxtLyZAiRMwGxrsWQ",
-  authDomain: "connect-four-41d0a.firebaseapp.com",
-  databaseURL: "https://connect-four-41d0a-default-rtdb.firebaseio.com",
-  projectId: "connect-four-41d0a",
-  storageBucket: "connect-four-41d0a.firebasestorage.app",
-  messagingSenderId: "296890020551",
-  appId: "1:296890020551:web:91b95d0c7732874cee84e2"
+const firebaseConfig = {
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "PASTE_YOUR_AUTH_DOMAIN",
+  databaseURL: "PASTE_YOUR_DATABASE_URL",
+  projectId: "PASTE_YOUR_PROJECT_ID",
+  storageBucket: "PASTE_YOUR_STORAGE_BUCKET",
+  messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID",
+  appId: "PASTE_YOUR_APP_ID"
 };
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -507,6 +507,9 @@ header{text-align:center;padding-top:4px;}
 header h1{font-family:'Fredoka One',cursive;font-size:clamp(1.8rem,5vw,2.8rem);color:var(--navy);line-height:1;}
 header h1 span{color:var(--blue);}
 header p{font-size:.85rem;color:#5a8a9f;margin-top:3px;font-weight:600;}
+.brand-tag{font-size:.78rem;color:#7aabb8;font-weight:600;margin-top:5px;line-height:1.5;}
+.brand-tag em{font-style:italic;font-weight:700;}
+.site-footer{font-size:.72rem;color:#9abbc8;font-weight:700;text-align:center;padding:10px 0 4px;letter-spacing:.2px;}
 
 /* Role badge */
 .role-badge{background:white;border-radius:50px;padding:7px 18px;font-size:.8rem;font-weight:800;color:var(--navy);box-shadow:0 2px 10px var(--shadow);}
@@ -629,6 +632,7 @@ header p{font-size:.85rem;color:#5a8a9f;margin-top:3px;font-weight:600;}
   <header>
     <h1>Connect <span>Four</span> 🌈</h1>
     <p>Drop a piece — connect four in a row to win!</p>
+    <p class="brand-tag">Playful Strategies for Real Life Challenges<br><em>Created by Michelle S. Coleman, LPC</em></p>
   </header>
 
   <div class="role-badge" id="role-badge">...</div>
@@ -718,9 +722,19 @@ for (let i = 0; i < 25; i++) {
 }
 </script>
 
+  <footer class="site-footer">© Michelle S. Coleman LPC PLLC — All Rights Reserved</footer>
+</div>
+
+<script>
+// Stars
+const starsEl = document.getElementById('stars');
+for (let i = 0; i < 25; i++) {
+  const s = document.createElement('div');
+  s.className = 'star';
+  s.style.cssText = `left:${Math.random()*100}%;top:${Math.random()*100}%;animation-delay:${Math.random()*3}s;animation-duration:${2+Math.random()*2}s;`;
+  starsEl.appendChild(s);
+}
+</script>
+
 </body>
-
 </html>
-
-
-
